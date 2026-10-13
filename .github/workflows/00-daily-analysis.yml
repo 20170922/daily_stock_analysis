@@ -287,6 +287,12 @@ jobs:
           LLM_OLLAMA_ENABLED: ${{ vars.LLM_OLLAMA_ENABLED || secrets.LLM_OLLAMA_ENABLED }}
           LLM_OLLAMA_EXTRA_HEADERS: ${{ vars.LLM_OLLAMA_EXTRA_HEADERS || secrets.LLM_OLLAMA_EXTRA_HEADERS }}
 
+          # OneAPI / One-Hub 兼容网关（如公司中转网关；LLM_CHANNELS 含 oneapi 时生效）
+          LLM_ONEAPI_PROTOCOL: ${{ vars.LLM_ONEAPI_PROTOCOL || secrets.LLM_ONEAPI_PROTOCOL }}
+          LLM_ONEAPI_BASE_URL: ${{ vars.LLM_ONEAPI_BASE_URL || secrets.LLM_ONEAPI_BASE_URL }}
+          LLM_ONEAPI_API_KEY: ${{ secrets.LLM_ONEAPI_API_KEY }}
+          LLM_ONEAPI_MODELS: ${{ vars.LLM_ONEAPI_MODELS || secrets.LLM_ONEAPI_MODELS }}
+
           # ==========================================
           # 数据源
           # ==========================================
@@ -299,6 +305,9 @@ jobs:
           TICKFLOW_KLINE_ADJUST: ${{ vars.TICKFLOW_KLINE_ADJUST || secrets.TICKFLOW_KLINE_ADJUST }}
           TICKFLOW_BATCH_DAILY_ENABLED: ${{ vars.TICKFLOW_BATCH_DAILY_ENABLED || secrets.TICKFLOW_BATCH_DAILY_ENABLED }}
           TICKFLOW_BATCH_SIZE: ${{ vars.TICKFLOW_BATCH_SIZE || secrets.TICKFLOW_BATCH_SIZE }}
+          # 同花顺行情（fuyao.aicubes.cn；不设则走免费源 fallback）
+          HITHINK_FINANCE_API_KEY: ${{ secrets.HITHINK_FINANCE_API_KEY }}
+          HITHINK_PRIORITY: ${{ vars.HITHINK_PRIORITY || secrets.HITHINK_PRIORITY }}
           # Longbridge OpenAPI（美股/港股实时行情字段补充；不设则仅 YFinance/AkShare，无 [Longbridge] 调用）
           LONGBRIDGE_OAUTH_CLIENT_ID: ${{ vars.LONGBRIDGE_OAUTH_CLIENT_ID || secrets.LONGBRIDGE_OAUTH_CLIENT_ID }}
           LONGBRIDGE_OAUTH_TOKEN_CACHE_B64: ${{ secrets.LONGBRIDGE_OAUTH_TOKEN_CACHE_B64 }}
