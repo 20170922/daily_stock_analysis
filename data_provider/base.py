@@ -1887,10 +1887,24 @@ class DataFetcherManager:
         else:
             logger.debug("[数据源初始化] 跳过未配置的 AlphaVantageFetcher")
 
+        hithink_api_key = (getattr(config, "hithink_api_key", None) or "").strip()
+        hithink_fetcher = None
+        if hithink_api_key:
+            from .hithink_fetcher import HithinkFetcher
+            hithink_fetcher = HithinkFetcher(
+                api_key=hithink_api_key,
+                base_url=(getattr(config, "hithink_base_url", None) or "").strip()
+                or "https://fuyao.aicubes.cn",
+                priority=getattr(config, "hithink_priority", 0),
+            )
+        else:
+            logger.debug("[数据源初始化] 跳过未配置的 HithinkFetcher")
+
         # 初始化数据源列表
         self._ensure_concurrency_guards()
         with self._fetchers_lock:
             self._fetchers = [
+                *( [hithink_fetcher] if hithink_fetcher is not None else []),
                 efinance,
                 akshare,
                 pytdx,

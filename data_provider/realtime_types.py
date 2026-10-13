@@ -104,6 +104,7 @@ class RealtimeSource(Enum):
     STOOQ = "stooq"                 # Stooq 美股兜底
     LONGBRIDGE = "longbridge"       # 长桥（美股/港股兜底）
     FUTU = "futu"                   # 富途 OpenD（港股）
+    HITHINK = "hithink"             # 同花顺金融数据服务（fuyao API）
     FALLBACK = "fallback"           # 降级兜底
 
 
