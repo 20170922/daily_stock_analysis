@@ -931,6 +931,9 @@ class Config:
     tickflow_priority: int = 2
     tickflow_batch_daily_enabled: bool = True
     tickflow_batch_size: int = 100
+    hithink_api_key: Optional[str] = None
+    hithink_priority: int = 0
+    hithink_base_url: Optional[str] = None
     futu_opend_host: Optional[str] = None
     futu_opend_port: int = 11111
     futu_hk_realtime_source_priority: str = "futu,longbridge,akshare,yfinance"
@@ -1857,6 +1860,9 @@ class Config:
             tickflow_priority=parse_env_int(os.getenv('TICKFLOW_PRIORITY'), 2, field_name='TICKFLOW_PRIORITY', minimum=0),
             tickflow_batch_daily_enabled=parse_env_bool(os.getenv('TICKFLOW_BATCH_DAILY_ENABLED'), default=True),
             tickflow_batch_size=parse_env_int(os.getenv('TICKFLOW_BATCH_SIZE'), 100, field_name='TICKFLOW_BATCH_SIZE', minimum=1),
+            hithink_api_key=os.getenv('HITHINK_FINANCE_API_KEY') or None,
+            hithink_priority=parse_env_int(os.getenv('HITHINK_PRIORITY'), 0, field_name='HITHINK_PRIORITY', minimum=0),
+            hithink_base_url=os.getenv('HITHINK_BASE_URL') or None,
             futu_opend_host=os.getenv('FUTU_OPEND_HOST') or None,
             futu_opend_port=parse_env_int(os.getenv('FUTU_OPEND_PORT'), 11111, field_name='FUTU_OPEND_PORT', minimum=1, maximum=65535),
             futu_hk_realtime_source_priority=os.getenv('FUTU_HK_REALTIME_SOURCE_PRIORITY', 'futu,longbridge,akshare,yfinance'),
