@@ -649,12 +649,14 @@ class DataFetcherManager:
     }
     _daily_source_health = CircuitBreaker(failure_threshold=3, cooldown_seconds=300.0)
     _CN_INDEX_DAILY_SOURCE_ORDER = (
+        "HithinkFetcher",
         "TencentFetcher",
         "AkshareFetcher",
         "TickFlowFetcher",
         "YfinanceFetcher",
     )
     _CN_INDEX_REALTIME_SOURCE_ORDER = (
+        ("HithinkFetcher", "hithink"),
         ("AkshareFetcher", "tencent"),
         ("AkshareFetcher", "sina"),
         ("EfinanceFetcher", "index"),
@@ -927,7 +929,7 @@ class DataFetcherManager:
             return ""
         if fetcher_name in {"TencentFetcher", "AkshareFetcher"}:
             return f"{exchange.lower()}{entry.bare_code}"
-        if fetcher_name == "TickFlowFetcher":
+        if fetcher_name in {"TickFlowFetcher", "HithinkFetcher"}:
             return f"{entry.bare_code}.{exchange}"
         if fetcher_name == "YfinanceFetcher":
             suffix = "SS" if exchange == "SH" else "SZ"
@@ -1275,7 +1277,7 @@ class DataFetcherManager:
                         "get_index_realtime_quote",
                         target.canonical_id,
                     )
-                elif source_kind == "tickflow":
+                elif source_kind in ("tickflow", "hithink"):
                     quote = self._call_fetcher_method(
                         fetcher,
                         "get_realtime_quote",
@@ -1396,6 +1398,8 @@ class DataFetcherManager:
         if fetcher_name == "EfinanceFetcher" and source_kind == "index":
             return target.canonical_id
         if fetcher_name == "TickFlowFetcher" and source_kind == "tickflow":
+            return f"{entry.bare_code}.{exchange}"
+        if fetcher_name == "HithinkFetcher" and source_kind == "hithink":
             return f"{entry.bare_code}.{exchange}"
         return ""
 
@@ -2697,6 +2701,16 @@ class DataFetcherManager:
 
                 elif source == "tickflow":
                     fetcher = self._get_fetcher_by_name("TickFlowFetcher", capability="realtime_quote")
+                    if fetcher is not None and hasattr(fetcher, 'get_realtime_quote'):
+                        record_provider_run_started(
+                            data_type="realtime_quote",
+                            provider=fetcher.name,
+                            operation="get_realtime_quote",
+                        )
+                        quote = self._call_fetcher_method(fetcher, 'get_realtime_quote', raw_stock_code or stock_code)
+
+                elif source == "hithink":
+                    fetcher = self._get_fetcher_by_name("HithinkFetcher", capability="realtime_quote")
                     if fetcher is not None and hasattr(fetcher, 'get_realtime_quote'):
                         record_provider_run_started(
                             data_type="realtime_quote",

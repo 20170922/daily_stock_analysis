@@ -39,6 +39,8 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_BASE_URL = "https://fuyao.aicubes.cn"
 _AUTH_MISSING_CODE = 2003
+# 全市场快照翻页保护：500 条/页时约 11 页可覆盖全市场，30 页为异常兜底。
+_MAX_SNAPSHOT_PAGES = 30
 
 # （thscode，项目内 code，中文名）
 _CN_MAIN_INDICES = (
@@ -57,6 +59,14 @@ def to_thscode(stock_code: str) -> str:
     for sep in (".SH", ".SZ", ".BJ"):
         if raw.endswith(sep) and len(raw) > len(sep):
             return raw
+    # 显式交易所前缀优先（sh600519 / SH000001 / ss600519），避免裸 000001 被误判。
+    prefix_map = {"SH": "SH", "SS": "SH", "SZ": "SZ", "BJ": "BJ"}
+    for prefix, suffix in prefix_map.items():
+        if raw.startswith(prefix):
+            digits = "".join(ch for ch in raw[len(prefix):] if ch.isdigit())
+            if len(digits) == 6:
+                return f"{digits}.{suffix}"
+            break
     digits = "".join(ch for ch in raw if ch.isdigit())
     if len(digits) != 6:
         raise DataFetchError(f"[Hithink] 无法解析股票代码: {stock_code!r}")
@@ -74,6 +84,31 @@ def _project_index_code(thscode: str) -> str:
     suffix = thscode.split(".")[1].lower() if "." in thscode else ""
     prefix = {"sh": "sh", "sz": "sz"}.get(suffix, "")
     return f"{prefix}{digits}"
+
+
+def _is_index_thscode(thscode: str) -> bool:
+    """判断是否为指数 thscode（指数历史走 /api/a-share-index，且无复权语义）。"""
+    bare, _, suffix = thscode.partition(".")
+    suffix = suffix.upper()
+    if suffix == "TI":
+        return True
+    if suffix == "SH" and bare.startswith("000"):
+        return True
+    if suffix == "SZ" and bare.startswith("399"):
+        return True
+    return False
+
+
+def _shanghai_midnight_ms(date_yyyymmdd: str) -> int:
+    """YYYYMMDD -> 当日 Asia/Shanghai 00:00 的毫秒时间戳（涨跌停池 date_ms 口径）。"""
+    try:
+        from zoneinfo import ZoneInfo
+
+        tz = ZoneInfo("Asia/Shanghai")
+    except Exception:  # pragma: no cover - 回退到东八区固定偏移
+        tz = timezone(timedelta(hours=8))
+    day = datetime.strptime(date_yyyymmdd, "%Y%m%d").replace(tzinfo=tz)
+    return int(day.timestamp() * 1000)
 
 
 class HithinkFetcher(BaseFetcher):
@@ -98,13 +133,26 @@ class HithinkFetcher(BaseFetcher):
         self.priority = priority
         self.snapshot_page_size = snapshot_page_size
         self._session_factory = session_factory or requests.Session
+        self._shared_session: Optional[requests.Session] = None
+
+    def _session(self) -> requests.Session:
+        # 管理器侧已按 fetcher 实例加锁串行调用，这里复用单会话避免连接泄漏。
+        if self._shared_session is None:
+            self._shared_session = self._session_factory()
+        return self._shared_session
+
+    def close(self) -> None:
+        session, self._shared_session = self._shared_session, None
+        if session is not None:
+            close = getattr(session, "close", None)
+            if callable(close):
+                close()
 
     # -- 基础请求 ----------------------------------------------------------
     def _request(self, path: str, params: Dict[str, Any]) -> Dict[str, Any]:
         url = f"{self.base_url}{path}"
         try:
-            session = self._session_factory()
-            resp = session.get(
+            resp = self._session().get(
                 url, params=params, headers={"X-api-key": self.api_key}, timeout=self.timeout
             )
             resp.raise_for_status()
@@ -143,6 +191,14 @@ class HithinkFetcher(BaseFetcher):
             change_pct = safe_float(item.get("price_change_ratio_pct"))
             if current is None:
                 continue
+            prev = safe_float(item.get("prev_price"))
+            high = safe_float(item.get("high_price"))
+            low = safe_float(item.get("low_price"))
+            amplitude = (
+                round((high - low) / prev * 100, 2)
+                if prev and high is not None and low is not None
+                else 0.0
+            )
             results.append(
                 {
                     "code": code,
@@ -151,12 +207,12 @@ class HithinkFetcher(BaseFetcher):
                     "change": safe_float(item.get("price_change"), 0.0),
                     "change_pct": change_pct if change_pct is not None else 0.0,
                     "open": safe_float(item.get("open_price"), current),
-                    "high": safe_float(item.get("high_price"), current),
-                    "low": safe_float(item.get("low_price"), current),
-                    "prev_close": safe_float(item.get("prev_price"), current),
+                    "high": high if high is not None else current,
+                    "low": low if low is not None else current,
+                    "prev_close": prev if prev is not None else current,
                     "volume": safe_float(item.get("volume"), 0.0),
                     "amount": safe_float(item.get("turnover"), 0.0),
-                    "amplitude": 0.0,
+                    "amplitude": amplitude,
                 }
             )
         return results or None
@@ -164,7 +220,13 @@ class HithinkFetcher(BaseFetcher):
     # -- 实时行情 ----------------------------------------------------------
     def get_realtime_quote(self, stock_code: str) -> Optional[UnifiedRealtimeQuote]:
         thscode = to_thscode(stock_code)
-        data = self._request("/api/a-share/prices/snapshot", {"thscodes": thscode})
+        # 指数快照走指数端点（A 股快照端点不覆盖指数 thscode）。
+        path = (
+            "/api/a-share-index/prices/snapshot"
+            if _is_index_thscode(thscode)
+            else "/api/a-share/prices/snapshot"
+        )
+        data = self._request(path, {"thscodes": thscode})
         items = data.get("item") or []
         item = items[0] if items else None
         if not isinstance(item, dict):
@@ -202,10 +264,17 @@ class HithinkFetcher(BaseFetcher):
             * 1000
             - 1
         )
-        data = self._request(
-            "/api/a-share/prices/historical",
-            {"thscode": thscode, "interval": "1d", "start": start_ms, "end": end_ms, "adjust": "forward"},
-        )
+        if _is_index_thscode(thscode):
+            # 指数走指数历史端点，且无复权语义、不接受 adjust 参数。
+            data = self._request(
+                "/api/a-share-index/prices/historical",
+                {"thscode": thscode, "interval": "1d", "start": start_ms, "end": end_ms},
+            )
+        else:
+            data = self._request(
+                "/api/a-share/prices/historical",
+                {"thscode": thscode, "interval": "1d", "start": start_ms, "end": end_ms, "adjust": "forward"},
+            )
         return pd.DataFrame(data.get("item") or [])
 
     def _normalize_data(self, df: pd.DataFrame, stock_code: str) -> pd.DataFrame:
@@ -243,6 +312,11 @@ class HithinkFetcher(BaseFetcher):
         self, date: Optional[str] = None, n: int = 20
     ) -> Optional[List[Dict[str, Any]]]:
         params: Dict[str, Any] = {"page": 1, "size": max(1, min(int(n or 20), 200))}
+        if date:
+            try:
+                params["date_ms"] = _shanghai_midnight_ms(date)
+            except ValueError as exc:
+                raise DataFetchError(f"[Hithink] 非法日期格式 {date!r}，期望 YYYYMMDD") from exc
         data = self._request("/api/a-share/special-data/limit-up-pool", params)
         results = []
         for item in data.get("item") or []:
@@ -291,7 +365,12 @@ class HithinkFetcher(BaseFetcher):
         up = down = flat = 0
         total_amount = 0.0
         seen = 0
+        pages = 0
         while True:
+            if pages >= _MAX_SNAPSHOT_PAGES:
+                logger.warning("[Hithink] 快照分页达到上限 %d，停止翻页", _MAX_SNAPSHOT_PAGES)
+                break
+            pages += 1
             data = self._request(
                 "/api/a-share/prices/snapshot", {"limit": limit, "offset": offset}
             )
