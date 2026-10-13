@@ -3060,11 +3060,11 @@ class Config:
     @classmethod
     def _resolve_realtime_source_priority(cls) -> str:
         """
-        Resolve realtime source priority with automatic tushare injection.
+        Resolve realtime source priority with automatic keyed-source injection.
 
-        When TUSHARE_TOKEN is configured but REALTIME_SOURCE_PRIORITY is not
-        explicitly set, automatically prepend 'tushare' to the default priority
-        so that the paid data source is utilized for realtime quotes as well.
+        When HITHINK_FINANCE_API_KEY/TUSHARE_TOKEN is configured but
+        REALTIME_SOURCE_PRIORITY is not explicitly set, automatically prepend
+        the keyed source(s) to the default priority so paid data is tried first.
         """
         explicit = os.getenv('REALTIME_SOURCE_PRIORITY')
         default_priority = 'tencent,akshare_sina,efinance,akshare_em'
@@ -3073,19 +3073,26 @@ class Config:
             # User explicitly set priority, respect it
             return explicit
 
+        import logging
+        logger = logging.getLogger(__name__)
+        resolved = default_priority
         tushare_token = os.getenv('TUSHARE_TOKEN', '').strip()
         if tushare_token:
             # Token configured but no explicit priority override
             # Prepend tushare so the paid source is tried first
-            import logging
-            logger = logging.getLogger(__name__)
-            resolved = f'tushare,{default_priority}'
+            resolved = f'tushare,{resolved}'
             logger.info(
                 f"TUSHARE_TOKEN detected, auto-injecting tushare into realtime priority: {resolved}"
             )
-            return resolved
 
-        return default_priority
+        hithink_api_key = os.getenv('HITHINK_FINANCE_API_KEY', '').strip()
+        if hithink_api_key:
+            resolved = f'hithink,{resolved}'
+            logger.info(
+                f"HITHINK_FINANCE_API_KEY detected, auto-injecting hithink into realtime priority: {resolved}"
+            )
+
+        return resolved
 
     @classmethod
     def reset_instance(cls) -> None:

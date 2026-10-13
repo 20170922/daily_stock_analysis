@@ -908,6 +908,20 @@ _FIELD_DEFINITIONS: Dict[str, Dict[str, Any]] = {
         "validation": {"min": 0, "max": 99},
         "display_order": 21,
     },
+    "HITHINK_BASE_URL": {
+        "title": "Hithink API Base URL",
+        "description": "Override the Hithink (Tonghuashun fuyao) API base URL. Leave empty to use the default https://fuyao.aicubes.cn.",
+        "category": "data_source",
+        "data_type": "string",
+        "ui_control": "text",
+        "is_sensitive": False,
+        "is_required": False,
+        "is_editable": True,
+        "default_value": None,
+        "options": [],
+        "validation": {},
+        "display_order": 22,
+    },
     "FUTU_OPEND_HOST": {
         "title": "Futu OpenD Host",
         "description": "IPv4 address or IPv4-resolvable hostname of the Futu OpenD service. Leave empty to disable Futu.",
@@ -4829,6 +4843,11 @@ _FIELD_HELP_METADATA: Dict[str, Dict[str, Any]] = {
     "HITHINK_PRIORITY": {
         "help_key": "settings.data_source.HITHINK_PRIORITY",
         "examples": ["HITHINK_PRIORITY=0"],
+        "docs": _DOC_FULL_GUIDE_DATA_SOURCE,
+    },
+    "HITHINK_BASE_URL": {
+        "help_key": "settings.data_source.HITHINK_BASE_URL",
+        "examples": ["HITHINK_BASE_URL=https://fuyao.aicubes.cn"],
         "docs": _DOC_FULL_GUIDE_DATA_SOURCE,
     },
     "SERPAPI_API_KEYS": {

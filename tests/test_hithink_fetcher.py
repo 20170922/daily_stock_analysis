@@ -6,7 +6,7 @@ import unittest
 import pandas as pd
 
 from data_provider.base import DataFetchError
-from data_provider.hithink_fetcher import HithinkFetcher, to_thscode
+from data_provider.hithink_fetcher import HithinkFetcher, _is_index_thscode, to_thscode
 from data_provider.realtime_types import RealtimeSource
 
 
@@ -50,6 +50,8 @@ class TestToThscode(unittest.TestCase):
     def test_plain_and_prefixed(self):
         self.assertEqual(to_thscode("600519"), "600519.SH")
         self.assertEqual(to_thscode("sh600519"), "600519.SH")
+        self.assertEqual(to_thscode("sh000001"), "000001.SH")
+        self.assertEqual(to_thscode("sz399001"), "399001.SZ")
         self.assertEqual(to_thscode("000001.SZ"), "000001.SZ")
         self.assertEqual(to_thscode("sz300364"), "300364.SZ")
         self.assertEqual(to_thscode("430047"), "430047.BJ")
@@ -128,6 +130,28 @@ class TestHithinkFetcher(unittest.TestCase):
         self.assertAlmostEqual(quote.price, 25.41)
         self.assertAlmostEqual(quote.change_pct, 3.84)
 
+    def test_realtime_quote_routes_index_to_index_endpoint(self):
+        seen = []
+        payload = {"code": 0, "message": "success", "data": {"item": [{
+            "thscode": "000001.SH", "ticker": "000001",
+            "volume": 100, "turnover": 200,
+            "last_price": 3797.24, "price_change": -16.5,
+            "price_change_ratio_pct": -0.434,
+            "open_price": 3806.9, "high_price": 3828.2,
+            "low_price": 3790.9, "prev_price": 3813.79,
+        }]}}
+
+        class _RouteSession(_FakeSession):
+            def get(self, url, params=None, headers=None, timeout=None):
+                seen.append(url)
+                return _FakeResponse(payload)
+
+        fetcher = HithinkFetcher(api_key="k", session_factory=lambda: _RouteSession([]))
+        quote = fetcher.get_realtime_quote("sh000001")
+        self.assertIn("/api/a-share-index/prices/snapshot", seen[0])
+        self.assertEqual(quote.code, "000001")
+        self.assertAlmostEqual(quote.price, 3797.24)
+
     def test_normalize_daily_computes_pct_chg(self):
         fetcher = _fetcher([])
         df = pd.DataFrame(
@@ -172,9 +196,15 @@ class TestHithinkFetcher(unittest.TestCase):
                 "data": {"pagination": {"total": 47}, "item": []}}
         sessions = []
 
+        class _PagedSession(_FakeSession):
+            def get(self, url, params=None, headers=None, timeout=None):
+                if "/prices/snapshot" in url:
+                    offset = (params or {}).get("offset", 0)
+                    return _FakeResponse(page2 if offset else page1)
+                return super().get(url, params=params, headers=headers, timeout=timeout)
+
         def factory():
-            session = _FakeSession([
-                ("/prices/snapshot", page1 if len(sessions) == 0 else page2),
+            session = _PagedSession([
                 ("limit-up-pool", pool),
                 ("limit-down-pool", pool),
             ])
@@ -188,6 +218,77 @@ class TestHithinkFetcher(unittest.TestCase):
         self.assertEqual(stats["flat_count"], 1)
         self.assertEqual(stats["limit_up_count"], 47)
         self.assertAlmostEqual(stats["total_amount"], 6.0)
+
+    def test_session_is_reused_across_requests(self):
+        created = []
+
+        def factory():
+            session = _FakeSession([
+                ("snapshot", {"code": 0, "message": "ok", "data": {"item": []}}),
+                ("hot-stock-list", {"code": 0, "message": "ok", "data": {"item": []}}),
+            ])
+            created.append(session)
+            return session
+
+        fetcher = HithinkFetcher(api_key="k", session_factory=factory)
+        fetcher.get_main_indices()
+        fetcher.get_hot_stocks()
+        self.assertEqual(len(created), 1)
+
+    def test_limit_up_pool_passes_date_ms(self):
+        captured = {}
+
+        class _CaptureSession(_FakeSession):
+            def get(self, url, params=None, headers=None, timeout=None):
+                captured.update(dict(params or {}))
+                return _FakeResponse({"code": 0, "message": "ok", "data": {"item": []}})
+
+        fetcher = HithinkFetcher(api_key="k", session_factory=lambda: _CaptureSession([]))
+        fetcher.get_limit_up_pool(date="20261012", n=5)
+        # 与线上日线最后一个交易日的 date_ms 口径一致（Asia/Shanghai 00:00）。
+        self.assertEqual(captured.get("date_ms"), 1791734400000)
+        with self.assertRaises(DataFetchError):
+            fetcher.get_limit_up_pool(date="not-a-date")
+
+    def test_index_daily_uses_index_endpoint(self):
+        seen = []
+
+        class _RouteSession(_FakeSession):
+            def get(self, url, params=None, headers=None, timeout=None):
+                seen.append((url, dict(params or {})))
+                return _FakeResponse({"code": 0, "message": "ok", "data": {"item": []}})
+
+        fetcher = HithinkFetcher(api_key="k", session_factory=lambda: _RouteSession([]))
+        fetcher._fetch_raw_data("sh000001", "2026-10-08", "2026-10-12")
+        self.assertIn("/api/a-share-index/prices/historical", seen[0][0])
+        self.assertNotIn("adjust", seen[0][1])
+        fetcher._fetch_raw_data("300364", "2026-10-08", "2026-10-12")
+        self.assertIn("/api/a-share/prices/historical", seen[1][0])
+        self.assertEqual(seen[1][1].get("adjust"), "forward")
+
+    def test_is_index_thscode(self):
+        self.assertTrue(_is_index_thscode("000001.SH"))
+        self.assertTrue(_is_index_thscode("399006.SZ"))
+        self.assertTrue(_is_index_thscode("886042.TI"))
+        self.assertFalse(_is_index_thscode("600519.SH"))
+        self.assertFalse(_is_index_thscode("000001.SZ"))
+
+    def test_main_indices_amplitude(self):
+        payload = {
+            "code": 0,
+            "message": "success",
+            "data": {"item": [{
+                "thscode": "000001.SH", "ticker": "000001",
+                "volume": 100, "turnover": 200,
+                "last_price": 100.0, "price_change": 1.0,
+                "price_change_ratio_pct": 1.0,
+                "open_price": 99.0, "high_price": 101.0,
+                "low_price": 98.0, "prev_price": 99.0,
+            }]},
+        }
+        fetcher = _fetcher([("index", payload)])
+        result = fetcher.get_main_indices()
+        self.assertAlmostEqual(result[0]["amplitude"], round(3 / 99 * 100, 2))
 
 
 if __name__ == "__main__":
