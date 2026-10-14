@@ -9,9 +9,11 @@ a-share/special-data）。无 Key 时不在 DataFetcherManager 中注册。
 实现范围（v1）：
 - get_main_indices: 指数行情快照（上证/深成/创业板/科创50/上证50/沪深300）
 - get_realtime_quote: 单只 A 股实时快照
-- _fetch_raw_data/_normalize_data: 单只 A 股历史日线（默认前复权）
-- get_limit_up_pool: 涨停池/连板梯队
-- get_hot_stocks: 热股榜单
+- _fetch_raw_data/_normalize_data: 单只 A 股历史日线（默认前复权，adjust 可覆写）
+- get_limit_up_pool: 涨停池/连板梯队（分页拉全，含连板文本/封单/原因）
+- get_limit_down_pool/get_limit_break_pool: 跌停池/炸板池（分页拉全）
+- get_hot_stocks: 热股榜单（含热度值/排名变化/趋势，默认当天榜）
+- get_auction_snapshot: 集合竞价快照（终态，取流通市值算换手）
 - get_market_stats: 全市场快照分页统计涨跌家数 + 涨跌停池计数
 - get_sector_rankings/get_concept_rankings: 未实现（待 TI 板块目录对接），返回 None
   由管理器继续降级到其它数据源。
@@ -56,7 +58,7 @@ _CN_MAIN_INDICES = (
 def to_thscode(stock_code: str) -> str:
     """将项目内股票代码转换为同花顺 thscode（600519.SH / 300364.SZ / 430047.BJ）。"""
     raw = (stock_code or "").strip().upper()
-    for sep in (".SH", ".SZ", ".BJ"):
+    for sep in (".SH", ".SZ", ".BJ", ".TI"):
         if raw.endswith(sep) and len(raw) > len(sep):
             return raw
     # 显式交易所前缀优先（sh600519 / SH000001 / ss600519），避免裸 000001 被误判。
@@ -255,7 +257,9 @@ class HithinkFetcher(BaseFetcher):
         )
 
     # -- 日线 --------------------------------------------------------------
-    def _fetch_raw_data(self, stock_code: str, start_date: str, end_date: str) -> pd.DataFrame:
+    def _fetch_raw_data(
+        self, stock_code: str, start_date: str, end_date: str, adjust: str = "forward"
+    ) -> pd.DataFrame:
         thscode = to_thscode(stock_code)
         tz = timezone(timedelta(hours=8))
         start_ms = int(datetime.strptime(start_date, "%Y-%m-%d").replace(tzinfo=tz).timestamp() * 1000)
@@ -271,9 +275,16 @@ class HithinkFetcher(BaseFetcher):
                 {"thscode": thscode, "interval": "1d", "start": start_ms, "end": end_ms},
             )
         else:
+            # 一字/T字/换手判断须用未复权；默认前复权供个股分析用。
             data = self._request(
                 "/api/a-share/prices/historical",
-                {"thscode": thscode, "interval": "1d", "start": start_ms, "end": end_ms, "adjust": "forward"},
+                {
+                    "thscode": thscode,
+                    "interval": "1d",
+                    "start": start_ms,
+                    "end": end_ms,
+                    "adjust": adjust or "forward",
+                },
             )
         return pd.DataFrame(data.get("item") or [])
 
@@ -307,40 +318,111 @@ class HithinkFetcher(BaseFetcher):
             prev_close = close
         return pd.DataFrame(rows, columns=STANDARD_COLUMNS)
 
-    # -- 涨停池 / 热榜 -----------------------------------------------------
-    def get_limit_up_pool(
-        self, date: Optional[str] = None, n: int = 20
-    ) -> Optional[List[Dict[str, Any]]]:
-        params: Dict[str, Any] = {"page": 1, "size": max(1, min(int(n or 20), 200))}
+    # -- 涨停池 / 跌停池 / 炸板池 / 热榜 --------------------------------------
+    _POOL_PATHS = {
+        "limit_up": "/api/a-share/special-data/limit-up-pool",
+        "limit_down": "/api/a-share/special-data/limit-down-pool",
+        "limit_break": "/api/a-share/special-data/limit-break-pool",
+    }
+    # 池接口单页上限 200；翻页熔断防止异常分页死循环。
+    _MAX_POOL_PAGES = 10
+
+    def _fetch_pool_all(
+        self, path: str, date: Optional[str] = None, page_size: int = 200
+    ) -> Tuple[List[Dict[str, Any]], int]:
+        """分页拉全指定池，返回 (原始条目, pagination.total)。"""
+        params: Dict[str, Any] = {"page": 1, "size": max(1, min(int(page_size or 200), 200))}
         if date:
             try:
                 params["date_ms"] = _shanghai_midnight_ms(date)
             except ValueError as exc:
                 raise DataFetchError(f"[Hithink] 非法日期格式 {date!r}，期望 YYYYMMDD") from exc
-        data = self._request("/api/a-share/special-data/limit-up-pool", params)
+        items: List[Dict[str, Any]] = []
+        total = 0
+        page = 0
+        while True:
+            page += 1
+            if page > self._MAX_POOL_PAGES:
+                logger.warning("[Hithink] 池分页达到上限 %d，停止翻页: %s", self._MAX_POOL_PAGES, path)
+                break
+            params["page"] = page
+            data = self._request(path, params)
+            batch = [it for it in (data.get("item") or []) if isinstance(it, dict)]
+            pagination = data.get("pagination") or {}
+            total = safe_int(pagination.get("total"), total) or total
+            if not batch:
+                break
+            items.extend(batch)
+            if (total and len(items) >= total) or len(batch) < params["size"]:
+                break
+        if total and len(items) != total:
+            logger.warning("[Hithink] 池条数与 total 不一致 path=%s got=%d total=%d", path, len(items), total)
+        return items, total
+
+    @staticmethod
+    def _normalize_pool_item(item: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        ticker = str(item.get("ticker") or "")
+        if not ticker:
+            return None
+        return {
+            "thscode": str(item.get("thscode") or ""),
+            "code": ticker,
+            "name": item.get("name") or "",
+            "is_st": bool(item.get("is_st", False)),
+            "price": safe_float(item.get("last_price"), 0.0),
+            "change_pct": safe_float(item.get("price_change_ratio_pct"), 0.0),
+            "continue_boards": safe_int(item.get("continue_day_cnt"), 0),
+            "continue_text": str(item.get("continue_day_text") or ""),
+            "limit_up_time": item.get("limit_up_time") or "",
+            "reason": item.get("limit_up_reason") or "",
+            "seal_amount": safe_float(item.get("seal_money"), 0.0),
+            "max_seal_amount": safe_float(item.get("max_seal_money"), 0.0),
+        }
+
+    def get_limit_up_pool(
+        self, date: Optional[str] = None, n: int = 20, page_size: int = 200
+    ) -> Optional[List[Dict[str, Any]]]:
+        raw_items, _ = self._fetch_pool_all(self._POOL_PATHS["limit_up"], date, page_size=page_size)
         results = []
-        for item in data.get("item") or []:
-            if not isinstance(item, dict):
-                continue
-            ticker = str(item.get("ticker") or "")
-            if not ticker:
-                continue
-            results.append(
-                {
-                    "code": ticker,
-                    "name": item.get("name") or "",
-                    "price": safe_float(item.get("last_price"), 0.0),
-                    "change_pct": safe_float(item.get("price_change_ratio_pct"), 0.0),
-                    "continue_boards": safe_int(item.get("continue_day_cnt"), 0),
-                    "limit_up_time": item.get("limit_up_time") or "",
-                    "reason": item.get("limit_up_reason") or "",
-                    "seal_amount": safe_float(item.get("seal_money"), 0.0),
-                }
-            )
+        for item in raw_items:
+            normalized = self._normalize_pool_item(item)
+            if normalized:
+                results.append(normalized)
+            if len(results) >= max(1, int(n or 20)):
+                break
+        return results or None
+
+    def get_limit_down_pool(
+        self, date: Optional[str] = None, n: int = 200, page_size: int = 200
+    ) -> Optional[List[Dict[str, Any]]]:
+        """跌停池全量（默认取全，n 仅做截断上限）。"""
+        raw_items, _ = self._fetch_pool_all(self._POOL_PATHS["limit_down"], date, page_size=page_size)
+        results = []
+        for item in raw_items:
+            normalized = self._normalize_pool_item(item)
+            if normalized:
+                results.append(normalized)
+            if len(results) >= max(1, int(n or 200)):
+                break
+        return results or None
+
+    def get_limit_break_pool(
+        self, date: Optional[str] = None, n: int = 200, page_size: int = 200
+    ) -> Optional[List[Dict[str, Any]]]:
+        """炸板池全量（曾涨停未封，封板率分母用）。"""
+        raw_items, _ = self._fetch_pool_all(self._POOL_PATHS["limit_break"], date, page_size=page_size)
+        results = []
+        for item in raw_items:
+            normalized = self._normalize_pool_item(item)
+            if normalized:
+                results.append(normalized)
+            if len(results) >= max(1, int(n or 200)):
+                break
         return results or None
 
     def get_hot_stocks(self, n: int = 10) -> Optional[List[Dict[str, Any]]]:
-        data = self._request("/api/a-share/special-data/hot-stock-list", {})
+        # 当天榜 period=day 带热度/排名变化/趋势；历史榜无这些字段，复盘只用当天榜。
+        data = self._request("/api/a-share/special-data/hot-stock-list", {"period": "day"})
         results = []
         for item in (data.get("item") or [])[: max(1, int(n or 10))]:
             if not isinstance(item, dict):
@@ -348,15 +430,107 @@ class HithinkFetcher(BaseFetcher):
             ticker = str(item.get("ticker") or "")
             if not ticker:
                 continue
+            trend = str(item.get("rank_trend") or "unknown")
             results.append(
                 {
                     "rank": safe_int(item.get("rank"), 0),
+                    "thscode": str(item.get("thscode") or ""),
                     "code": ticker,
                     "name": item.get("name") or "",
+                    "heat": str(item.get("heat") or ""),
+                    "rank_change": item.get("rank_change"),
+                    "rank_trend": trend,
+                    "trend_text": {"up": "上升", "down": "下降", "flat": "持平"}.get(trend, "持平"),
                     "source": "同花顺热股榜",
                 }
             )
         return results or None
+
+    # -- 市场宽度（Parquet 10日日K，未复权收盘对比前一日）----------------------
+    def get_market_breadth(self, date: str) -> Optional[Dict[str, int]]:
+        """全市场涨跌家数（沪深股票，不含北交所），失败返回 None 走快照降级."""
+        import re
+        import tempfile
+        import urllib.request
+
+        try:
+            data = self._request("/api/dump/market-dumps/daily-k-10d/download-url", {})
+            url = str(data.get("presigned_url") or "")
+            if not url:
+                return None
+            target_ms = _shanghai_midnight_ms(date)
+            # Windows 下 NamedTemporaryFile(delete=True) 会被锁定，改手动删除。
+            tmp_path = ""
+            try:
+                with tempfile.NamedTemporaryFile(suffix=".parquet", delete=False) as tmp:
+                    tmp_path = tmp.name
+                urllib.request.urlretrieve(url, tmp_path)
+                df = pd.read_parquet(tmp_path, columns=["thscode", "date_ms", "close_price"])
+            finally:
+                if tmp_path:
+                    try:
+                        import os
+
+                        os.unlink(tmp_path)
+                    except OSError:
+                        pass
+        except Exception as exc:  # noqa: BLE001 - 下载/解析失败走降级
+            logger.warning("[Hithink] 宽度 Parquet 获取失败，走快照降级: %s", exc)
+            return None
+        try:
+            pattern = re.compile(r"^[036][0-9]{5}\.(SH|SZ)$")
+            sub = df[df["thscode"].astype(str).str.match(pattern, na=False)]
+            days = sorted(int(v) for v in sub["date_ms"].dropna().unique())
+            past = [d for d in days if d <= target_ms]
+            if len(past) < 2:
+                return None
+            prev_ms, cur_ms = past[-2], past[-1]
+            pivot = sub[sub["date_ms"].isin((prev_ms, cur_ms))].pivot_table(
+                index="thscode", columns="date_ms", values="close_price", aggfunc="last"
+            )
+            up = down = flat = 0
+            for _, row in pivot.iterrows():
+                try:
+                    old, cur = float(row[prev_ms]), float(row[cur_ms])
+                except (KeyError, TypeError, ValueError):
+                    continue
+                if cur > old:
+                    up += 1
+                elif cur < old:
+                    down += 1
+                else:
+                    flat += 1
+            total = up + down + flat
+            if not total:
+                return None
+            return {"up_count": up, "down_count": down, "flat_count": flat}
+        except Exception as exc:  # noqa: BLE001 - 计算失败走降级
+            logger.warning("[Hithink] 宽度计算失败，走快照降级: %s", exc)
+            return None
+
+    def get_auction_snapshot(
+        self, thscodes: List[str], stage: str = "final"
+    ) -> Dict[str, float]:
+        """集合竞价快照（终态），返回 {thscode: 流通市值}，用于连板换手率。
+
+        当天快照无历史日期参数，须在当日收盘后、次日开盘前调用。
+        """
+        codes = [c for c in (thscodes or []) if c]
+        caps: Dict[str, float] = {}
+        for start in range(0, len(codes), 100):
+            chunk = codes[start : start + 100]
+            data = self._request(
+                "/api/a-share/auction/snapshot",
+                {"thscodes": ",".join(chunk), "stage": stage or "final"},
+            )
+            for item in data.get("item") or []:
+                if not isinstance(item, dict):
+                    continue
+                thscode = str(item.get("thscode") or "")
+                cap = safe_float(item.get("float_market_cap"))
+                if thscode and cap:
+                    caps[thscode] = cap
+        return caps
 
     # -- 市场统计 ----------------------------------------------------------
     def get_market_stats(self) -> Optional[Dict[str, Any]]:

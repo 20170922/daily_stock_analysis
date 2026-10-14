@@ -56,6 +56,7 @@ class TestToThscode(unittest.TestCase):
         self.assertEqual(to_thscode("sz300364"), "300364.SZ")
         self.assertEqual(to_thscode("430047"), "430047.BJ")
         self.assertEqual(to_thscode("920002.bj"), "920002.BJ")
+        self.assertEqual(to_thscode("883900.TI"), "883900.TI")
 
     def test_invalid(self):
         with self.assertRaises(DataFetchError):
@@ -289,6 +290,106 @@ class TestHithinkFetcher(unittest.TestCase):
         fetcher = _fetcher([("index", payload)])
         result = fetcher.get_main_indices()
         self.assertAlmostEqual(result[0]["amplitude"], round(3 / 99 * 100, 2))
+
+    def test_pool_pagination_merges_all_pages(self):
+        def pool_payload(page, total, codes):
+            return {
+                "code": 0, "message": "ok",
+                "data": {
+                    "pagination": {"total": total, "pages": 2, "size": 2, "page": page},
+                    "item": [
+                        {"ticker": c, "thscode": f"{c}.SH", "name": f"股{c}",
+                         "last_price": 10.0, "price_change_ratio_pct": 10.0,
+                         "continue_day_cnt": 3, "continue_day_text": "3连板",
+                         "limit_up_reason": "测试", "seal_money": 1.0,
+                         "max_seal_money": 2.0}
+                        for c in codes
+                    ],
+                },
+            }
+
+        seen_pages = []
+
+        class _PagedSession(_FakeSession):
+            def get(self, url, params=None, headers=None, timeout=None):
+                page = (params or {}).get("page", 1)
+                seen_pages.append(page)
+                if page == 1:
+                    return _FakeResponse(pool_payload(1, 3, ["600001", "600002"]))
+                return _FakeResponse(pool_payload(2, 3, ["600003"]))
+
+        fetcher = HithinkFetcher(api_key="k", session_factory=lambda: _PagedSession([]))
+        result = fetcher.get_limit_up_pool(date="20261013", n=200, page_size=2)
+        self.assertEqual([r["code"] for r in result], ["600001", "600002", "600003"])
+        self.assertEqual(seen_pages, [1, 2])
+        self.assertEqual(result[0]["continue_text"], "3连板")
+        self.assertEqual(result[0]["thscode"], "600001.SH")
+
+    def test_down_and_break_pools_normalize(self):
+        payload = {
+            "code": 0, "message": "ok",
+            "data": {
+                "pagination": {"total": 1, "pages": 1, "size": 200, "page": 1},
+                "item": [{"ticker": "600004", "thscode": "600004.SH", "name": "跌股",
+                          "last_price": 5.0, "price_change_ratio_pct": -10.0}],
+            },
+        }
+        fetcher = _fetcher([("limit-down-pool", payload), ("limit-break-pool", payload)])
+        down = fetcher.get_limit_down_pool(date="20261013")
+        brk = fetcher.get_limit_break_pool(date="20261013")
+        self.assertEqual(down[0]["code"], "600004")
+        self.assertEqual(brk[0]["change_pct"], -10.0)
+
+    def test_hot_stocks_full_fields_and_day_period(self):
+        captured = {}
+        payload = {
+            "code": 0, "message": "ok",
+            "data": {"item": [
+                {"rank": 1, "thscode": "600418.SH", "ticker": "600418",
+                 "name": "江淮汽车", "heat": "5714814",
+                 "rank_change": 1, "rank_trend": "up"},
+                {"rank": 2, "thscode": "600127.SH", "ticker": "600127",
+                 "name": "金健米业", "heat": "4869802",
+                 "rank_change": -1, "rank_trend": "down"},
+            ]},
+        }
+
+        class _CaptureSession(_FakeSession):
+            def get(self, url, params=None, headers=None, timeout=None):
+                captured.update(dict(params or {}))
+                return _FakeResponse(payload)
+
+        fetcher = HithinkFetcher(api_key="k", session_factory=lambda: _CaptureSession([]))
+        result = fetcher.get_hot_stocks(n=30)
+        self.assertEqual(captured.get("period"), "day")
+        self.assertEqual(result[0]["heat"], "5714814")
+        self.assertEqual(result[0]["rank_change"], 1)
+        self.assertEqual(result[0]["trend_text"], "上升")
+        self.assertEqual(result[1]["trend_text"], "下降")
+
+    def test_auction_snapshot_maps_caps(self):
+        payload = {
+            "code": 0, "message": "ok",
+            "data": {"item": [
+                {"thscode": "605577.SH", "float_market_cap": 8500000000},
+                {"thscode": "600519.SH", "float_market_cap": 0},
+            ]},
+        }
+        fetcher = _fetcher([("auction/snapshot", payload)])
+        caps = fetcher.get_auction_snapshot(["605577.SH", "600519.SH"])
+        self.assertEqual(caps, {"605577.SH": 8500000000})
+
+    def test_fetch_raw_data_adjust_none(self):
+        seen = []
+
+        class _RouteSession(_FakeSession):
+            def get(self, url, params=None, headers=None, timeout=None):
+                seen.append((url, dict(params or {})))
+                return _FakeResponse({"code": 0, "message": "ok", "data": {"item": []}})
+
+        fetcher = HithinkFetcher(api_key="k", session_factory=lambda: _RouteSession([]))
+        fetcher._fetch_raw_data("300364", "2026-10-12", "2026-10-13", adjust="none")
+        self.assertEqual(seen[0][1].get("adjust"), "none")
 
 
 if __name__ == "__main__":

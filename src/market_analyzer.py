@@ -776,6 +776,72 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
         
         return all_news
     
+    def _try_deep_limitup_review(self, news: List) -> Optional[str]:
+        """深度涨停复盘（review_structures 配置选配），失败返回 None 走老链路。"""
+        try:
+            if (self.region or "cn") != "cn":
+                return None
+            from src.services.review import (
+                DeepReviewBuilder,
+                DeepReviewUnavailable,
+                load_structure,
+                resolve_structure_name,
+            )
+            from data_provider.hithink_fetcher import HithinkFetcher
+
+            structure_name = resolve_structure_name(getattr(self.config, "market_review_structure", ""))
+            if structure_name == "legacy":
+                return None
+            structure = load_structure(structure_name)
+            if structure is None:
+                return None
+            api_key = (getattr(self.config, "hithink_api_key", "") or "").strip()
+            if not api_key:
+                logger.info(
+                    "[大盘] %s action=deep_review status=skip reason=no_hithink_key",
+                    self._log_context(),
+                )
+                return None
+            base_url = (getattr(self.config, "hithink_base_url", "") or "").strip() or None
+            fetcher = HithinkFetcher(api_key=api_key, **({"base_url": base_url} if base_url else {}))
+            try:
+                from zoneinfo import ZoneInfo
+
+                shanghai_today = datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y%m%d")
+            except Exception:  # noqa: BLE001 - 时区兜底
+                shanghai_today = datetime.now().strftime("%Y%m%d")
+            builder = DeepReviewBuilder(
+                fetcher=fetcher, structure=structure, analyzer=self.analyzer, news=news
+            )
+            try:
+                report = builder.build(shanghai_today)
+            finally:
+                try:
+                    fetcher.close()
+                except Exception:  # noqa: BLE001 - 关闭失败不影响报告
+                    pass
+            logger.info(
+                "[大盘] %s action=deep_review status=success length=%d structure=%s",
+                self._log_context(),
+                len(report),
+                structure_name,
+            )
+            return report
+        except DeepReviewUnavailable as exc:
+            logger.warning(
+                "[大盘] %s action=deep_review status=fallback reason=%s",
+                self._log_context(),
+                exc,
+            )
+            return None
+        except Exception as exc:  # noqa: BLE001 - 深度链路任何异常都降级，不阻断复盘
+            logger.warning(
+                "[大盘] %s action=deep_review status=fallback error=%s",
+                self._log_context(),
+                exc,
+            )
+            return None
+
     def generate_market_review(self, overview: MarketOverview, news: List) -> str:
         """
         使用大模型生成大盘复盘报告
@@ -2048,7 +2114,9 @@ Market conditions can change quickly. The data above is for reference only and d
         news = self._merge_persisted_market_intelligence(news)
 
         # 3. 生成复盘报告
-        report = self.generate_market_review(overview, news)
+        report = self._try_deep_limitup_review(news)
+        if report is None:
+            report = self.generate_market_review(overview, news)
         snapshot = self.build_market_light_snapshot(overview) if self._supports_market_light() else None
         structured_payload = self.build_market_review_payload(
             overview,

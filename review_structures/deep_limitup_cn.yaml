@@ -1,0 +1,112 @@
+# 深度涨停复盘结构（A 股）/ Deep limit-up review structure (CN)
+#
+# 选配方式（改配置不改代码）：
+#   MARKET_REVIEW_STRUCTURE=deep_limitup_cn   # 本文件（默认）
+#   MARKET_REVIEW_STRUCTURE=legacy            # 走老模板链路
+# 新增一种结构 = 复制本文件改名 + 改 sections/prompt + 切环境变量。
+
+name: deep_limitup_cn
+display_name: 深度涨停复盘
+description: 对齐人工复盘八章结构：指数表、连板天梯、热度榜、主线判断、预判验证、生命图谱。数据章节纯规则渲染，判断章节走 LLM。
+region: cn
+version: 1
+
+data_sources:
+  index_codes: [000001.SH, 399001.SZ, 399006.SZ, 000688.SH, 000300.SH, 000016.SH, 000905.SH, 000852.SH]
+  yesterday_limit_index: 883900.TI
+  pool_size: 200
+  hot_n: 30
+  # 首板代表：按封单金额取前 N（省掉全量日 K 请求）
+  first_board_top_n: 8
+  # 热点排名取前 N
+  reason_rank_top_n: 4
+  # 涨停原因归组：reason 含任一 keywords 即归入该组；都未命中则按首关键词单列。
+  # 改归组不用改代码，只改这里。
+  reason_groups:
+    - name: PCB
+      keywords: [PCB, HDI, 覆铜板, 铜箔, 电子布]
+    - name: AI短剧/影视
+      keywords: [短剧, 影视, 漫剧, 院线, 文化传媒]
+    - name: 出版
+      keywords: [出版, 图书, 发行]
+    - name: 冰雪旅游
+      keywords: [冰雪, 旅游, 滑雪, 索道]
+    - name: 染料
+      keywords: [染料, 颜料, 印染]
+    - name: 电池/锂电
+      keywords: [电池, 锂电, 锂, 储能]
+    - name: 光芯片/CPO
+      keywords: [光芯片, CPO, 光模块, 光探测]
+    - name: 重整/收购
+      keywords: [重整, 收购, 要约, 股权]
+
+conventions:
+  # 一字：开高低收几乎相等；T 字：开=高=收且最低更低；其余为换手板
+  flat_tolerance_pct: 0.2
+  seal_rate_formula: 涨停家数 / (涨停家数 + 炸板家数)
+  turnover_formula: 当日成交量 / 流通股本（流通股本 = 集合竞价流通市值 / 当日最新价）
+  not_advice: 以上内容是交易日复盘记录，不是投资建议。
+
+sections:
+  - key: market_status
+    title: 一、大盘状态
+    mode: data
+  - key: limitup
+    title: 二、涨停板分析
+    mode: data
+  - key: hotlist
+    title: 热度榜
+    mode: data
+    parent: limitup
+  - key: mainline
+    title: 三、当日主线判断
+    mode: llm
+    prompt: |
+      根据下面的【数据包】写"当日主线判断"。
+      要求：
+      1. 先一句话定主线：有没有容量票把方向封成高度，高度在哪里。
+      2. 判断依据逐条列，每条只写可核对的事实（代码+数字），不写无法验证的推断。
+      3. 支线/轮动单列，说明有没有连板。
+      4. 盘面特征三行以内：宽度修复与否、最高连板变化、封板率对比。
+      5. 禁止事项：不臆测资金流向；不写"预计""有望"类预判（预判只出现在第六章）；不评价未在数据包里的个股。
+  - key: core_stocks
+    title: 四、核心标的
+    mode: llm
+    prompt: |
+      根据下面的【数据包】写"核心标的"：先给表格（个股/板块/连板与表现/今日表现/辨识度），再逐只用一句话点评（只谈封单、换手、成交三个维度）。
+      不写买卖建议，不写目标价。
+  - key: mindmap
+    title: 五、板块思维导图总结
+    mode: llm
+    prompt: |
+      把【数据包】里的热点方向整理成板块思维导图：每个板块一段，列连板、未晋级、首板三类，每类只写代码与关键数字。
+      板块按涨停家数排序。没有连板的板块注明"没有连板"。
+  - key: expectation
+    title: 六、下一交易日预期
+    mode: llm
+    prompt: |
+      写"下一交易日预期"：先一句话指数预期（只谈成交额门槛与上证红绿两个可核对条件），
+      然后列"明日只核对 N 条"（N 取 5，每条只有一个是否结果，对象必须是数据包里出现过的指数或个股），
+      最后是"上一份复盘预期验证"表格（三列：预期/实际/结果✅❌，只对照【昨日预期】里写下的条目，不补写当时没有的预期）。
+      没有昨日预期时，该表格写"无昨日预期可验证"。
+  - key: plan
+    title: 七、下一交易日看盘计划
+    mode: llm
+    prompt: |
+      写"下一交易日看盘计划"，分四块：大盘环境判断（量能/情绪/结构/结论各一行，结论只说核对什么，不做预判）、
+      主线方向推演（每个方向两行：涨停意味着什么、未涨停按什么处理）、风险预警（薄封单/高换手次日/无行情高标/首板堆叠，只点名数据包里的实例）、
+      每块只写可执行的核对动作，不写"看好""有望"。核对对象必须是数据包里的指数、金额、家数、个股涨跌，禁止出现资金流、净流出、主力、情绪面等数据包没有的维度。
+  - key: lifemap
+    title: 八、本周生命图谱
+    mode: history
+  - key: notes
+    title: 数据说明
+    mode: data
+
+llm:
+  # 判断类与计划类分两次调用，单次失败不影响另一组
+  groups:
+    - [mainline, core_stocks, mindmap]
+    - [expectation, plan]
+  temperature: 0.3
+  max_tokens: 4000

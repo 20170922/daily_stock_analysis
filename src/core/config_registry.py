@@ -3681,6 +3681,32 @@ _FIELD_DEFINITIONS: Dict[str, Dict[str, Any]] = {
         ],
         "warning_codes": [],
     },
+    "MARKET_REVIEW_STRUCTURE": {
+        "title": "Market Review Structure",
+        "description": "Review structure config from review_structures/: deep_limitup_cn (8-section limit-up review) or legacy (old template flow). Add a YAML file to add a style without code changes.",
+        "category": "system",
+        "data_type": "string",
+        "ui_control": "text",
+        "is_sensitive": False,
+        "is_required": False,
+        "is_editable": True,
+        "default_value": "deep_limitup_cn",
+        "options": ["deep_limitup_cn", "legacy"],
+        "validation": {"allowed_values": ["deep_limitup_cn", "legacy"]},
+        "display_order": 49,
+        "help_key": "settings.system.market_review",
+        "examples": [
+            "MARKET_REVIEW_STRUCTURE=deep_limitup_cn",
+            "MARKET_REVIEW_STRUCTURE=legacy",
+        ],
+        "docs": [
+            {
+                "label": "完整指南：环境变量完整列表",
+                "href": "https://github.com/ZhuLinsen/daily_stock_analysis/blob/main/docs/full-guide.md#环境变量完整列表",
+            },
+        ],
+        "warning_codes": [],
+    },
     "MARKET_REVIEW_COLOR_SCHEME": {
         "title": "Market Review Color Scheme",
         "description": "Index change color style in market-review tables: green_up (green for gains, red for losses) or red_up (red for gains, green for losses).",
@@ -3696,7 +3722,7 @@ _FIELD_DEFINITIONS: Dict[str, Dict[str, Any]] = {
             {"label": "Red Up / Green Down", "value": "red_up"},
         ],
         "validation": {"enum": ["green_up", "red_up"]},
-        "display_order": 49,
+        "display_order": 50,
         "help_key": "settings.system.market_review",
         "examples": [
             "MARKET_REVIEW_COLOR_SCHEME=green_up",
